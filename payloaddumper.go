@@ -162,7 +162,7 @@ func (pd *payloadDumper) performInstallOperation(output io.Writer, iop *InstallO
 		return
 	}
 
-	// if there was a data hash, validate - TODO, haven't hit this in testing yet
+	// if there was a data hash, validate 
 	if hasher != nil {
 		dataSum := hasher.Sum(nil)
 		if bytes.Compare(dataSum, iop.GetDataSha256Hash()) != 0 {

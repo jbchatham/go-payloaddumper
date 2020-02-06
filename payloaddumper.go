@@ -1,18 +1,21 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"compress/bzip2"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"github.com/golang/protobuf/proto"
-	"compress/bzip2"
 	"github.com/xi2/xz"
+	"hash"
 	"io"
-	"os"
 	"log"
-	"bytes"
-	"bufio"
+	"os"
 )
 
 const (
@@ -125,21 +128,31 @@ func NewPayloadDumper(fileName string) (pd *payloadDumper, err error) {
 	return
 }
 
-
 func (pd *payloadDumper) performInstallOperation(output io.Writer, iop *InstallOperation, readBuf *bytes.Buffer) (err error) {
-	readStart := int64(iop.GetDataOffset());
-	readSize := int64(iop.GetDataLength());
+	readStart := int64(iop.GetDataOffset())
+	readSize := int64(iop.GetDataLength())
 	//log.Printf("Performing install operation: %v, data start %d, read offset %d, read start: %d, read size %d", iop.GetType(), pd.dataOffset, readStart, int64(readStart) + pd.dataOffset, readSize)
 	// reset buf
 	readBuf.Reset()
 	// seek to start
-	_, err = pd.payloadFile.Seek(pd.dataOffset + readStart,0)
+	_, err = pd.payloadFile.Seek(pd.dataOffset+readStart, 0)
 	if err != nil {
 		err = fmt.Errorf("Failed to seek to install operation start: %v", err)
 		return
 	}
+
+	// if there's a data hash, setup to hash data on read
+	var srcDataReader io.Reader
+	var hasher hash.Hash
+	if iop.GetDataSha256Hash() != nil && len(iop.GetDataSha256Hash()) > 0 {
+		hasher = sha256.New()
+		srcDataReader = io.TeeReader(pd.payloadFile, hasher)
+	} else {
+		srcDataReader = io.Reader(pd.payloadFile)
+	}
+
 	// read the expected data
-	bytesRead, err := io.CopyN(readBuf, pd.payloadFile, readSize)
+	bytesRead, err := io.CopyN(readBuf, srcDataReader, readSize)
 	if err != nil {
 		err = fmt.Errorf("Failed to read install operation: %v", err)
 		return
@@ -147,7 +160,17 @@ func (pd *payloadDumper) performInstallOperation(output io.Writer, iop *InstallO
 	if bytesRead != readSize {
 		err = fmt.Errorf("Read %d bytes, expecting %d", bytesRead, readSize)
 		return
-	} 
+	}
+
+	// if there was a data hash, validate - TODO, haven't hit this in testing yet
+	if hasher != nil {
+		dataSum := hasher.Sum(nil)
+		if bytes.Compare(dataSum, iop.GetDataSha256Hash()) != 0 {
+			err = fmt.Errorf("SHA256 failed for operation, expected %s, calculated %s", hex.EncodeToString(iop.GetDataSha256Hash()), hex.EncodeToString(dataSum))
+			return
+		}
+	}
+
 	iopReader := io.Reader(bytes.NewReader(readBuf.Bytes()))
 	switch iop.GetType() {
 	case InstallOperation_REPLACE_XZ:
@@ -157,21 +180,23 @@ func (pd *payloadDumper) performInstallOperation(output io.Writer, iop *InstallO
 			return
 		}
 	case InstallOperation_REPLACE_BZ:
-		iopReader  = bzip2.NewReader(iopReader)
+		iopReader = bzip2.NewReader(iopReader)
 	case InstallOperation_REPLACE:
 		// nothing to do
 	default:
 		err = fmt.Errorf("Unimplemented install operation type: %v", iop.GetType())
 		return
 	}
+
 	if iopReader != nil {
 		_, err = io.Copy(output, iopReader)
 		if err != nil {
-			err = fmt.Errorf("Error copying install operation to output file: %v" ,err)
+			err = fmt.Errorf("Error copying install operation to output file: %v", err)
 			return
 		}
 		//log.Printf("%d bytes copied to output file", bytesCopied)
 	}
+
 	return
 }
 
@@ -188,7 +213,7 @@ func (pd *payloadDumper) dumpPartition(pu *PartitionUpdate, readBuf *bytes.Buffe
 	output := bufio.NewWriter(outputFile)
 	defer output.Flush()
 	for _, io := range pu.GetOperations() {
-		err = pd.performInstallOperation(outputFile, io, readBuf)
+		err = pd.performInstallOperation(output, io, readBuf)
 		if err != nil {
 			err = fmt.Errorf("Failed to dump partition '%s': %v", pu.GetPartitionName(), err)
 			return

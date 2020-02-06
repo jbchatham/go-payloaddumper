@@ -213,6 +213,8 @@ func (pd *payloadDumper) dumpPartition(pu *PartitionUpdate, readBuf *bytes.Buffe
 	output := bufio.NewWriter(outputFile)
 	defer output.Flush()
 	for _, io := range pu.GetOperations() {
+		// TODO, convert this to a goroutine?  Will need to sync around the file read/writes, but the decompression seems to be single threaded
+		// right now, so might gain a little benefit.. if nothing else, interesting exercise..
 		err = pd.performInstallOperation(output, io, readBuf)
 		if err != nil {
 			err = fmt.Errorf("Failed to dump partition '%s': %v", pu.GetPartitionName(), err)
